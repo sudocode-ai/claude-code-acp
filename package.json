@@ -1,5 +1,5 @@
 {
-  "name": "@zed-industries/claude-code-acp",
+  "name": "@sudocode-ai/claude-code-acp",
   "publishConfig": {
     "access": "public"
   },
@@ -29,7 +29,11 @@
     "test:integration": "RUN_INTEGRATION_TESTS=true vitest run",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release": "./scripts/release.sh",
+    "publish:patch": "npm version patch && npm publish",
+    "publish:minor": "npm version minor && npm publish",
+    "publish:major": "npm version major && npm publish"
   },
   "keywords": [
     "claude",
@@ -40,15 +44,15 @@
     "sdk",
     "code"
   ],
-  "homepage": "https://github.com/zed-industries/claude-code-acp#readme",
+  "homepage": "https://github.com/sudocode-ai/claude-code-acp#readme",
   "bugs": {
-    "url": "https://github.com/zed-industries/claude-code-acp/issues"
+    "url": "https://github.com/sudocode-ai/claude-code-acp/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zed-industries/claude-code-acp.git"
+    "url": "git+https://github.com/sudocode-ai/claude-code-acp.git"
   },
-  "author": "Zed Industries",
+  "author": "Sudocode AI",
   "license": "Apache-2.0",
   "dependencies": {
     "@agentclientprotocol/sdk": "0.12.0",
