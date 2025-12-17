@@ -9,6 +9,8 @@ import {
   ForkSessionResponse,
   InitializeRequest,
   InitializeResponse,
+  LoadSessionRequest,
+  LoadSessionResponse,
   ndJsonStream,
   NewSessionRequest,
   NewSessionResponse,
@@ -17,8 +19,6 @@ import {
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestError,
-  ResumeSessionRequest,
-  ResumeSessionResponse,
   SessionModelState,
   SessionNotification,
   SetSessionModelRequest,
@@ -192,8 +192,8 @@ export class ClaudeAcpAgent implements Agent {
         },
         sessionCapabilities: {
           fork: {},
-          resume: {},
         },
+        loadSession: true,
       },
       agentInfo: {
         name: packageJson.name,
@@ -218,11 +218,17 @@ export class ClaudeAcpAgent implements Agent {
     });
   }
 
-  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+  /**
+   * Fork an existing session to create a new independent session.
+   * This is the ACP protocol method handler for session/fork.
+   */
+  async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    // cwd and mcpServers are passed via _meta since they're not in the SDK type yet
+    const meta = params._meta as { cwd?: string; mcpServers?: any[] } | undefined;
     return await this.createSession(
       {
-        cwd: params.cwd,
-        mcpServers: params.mcpServers ?? [],
+        cwd: meta?.cwd ?? process.cwd(),
+        mcpServers: meta?.mcpServers ?? [],
         _meta: params._meta,
       },
       {
@@ -232,7 +238,18 @@ export class ClaudeAcpAgent implements Agent {
     );
   }
 
-  async unstable_resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+  /**
+   * @deprecated Use forkSession instead. This is kept for backward compatibility.
+   */
+  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    return this.forkSession(params);
+  }
+
+  /**
+   * Load an existing session to resume a previous conversation.
+   * This is the ACP protocol method handler for session/load.
+   */
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const response = await this.createSession(
       {
         cwd: params.cwd,
@@ -245,6 +262,22 @@ export class ClaudeAcpAgent implements Agent {
     );
 
     return response;
+  }
+
+  /**
+   * @deprecated Use loadSession instead. This is kept for backward compatibility.
+   */
+  async unstable_resumeSession(params: {
+    sessionId: string;
+    _meta?: { cwd?: string; mcpServers?: any[]; [key: string]: unknown } | null;
+  }): Promise<LoadSessionResponse> {
+    const meta = params._meta as { cwd?: string; mcpServers?: any[] } | undefined;
+    return this.loadSession({
+      sessionId: params.sessionId,
+      cwd: meta?.cwd ?? process.cwd(),
+      mcpServers: meta?.mcpServers ?? [],
+      _meta: params._meta,
+    });
   }
 
   async authenticate(_params: AuthenticateRequest): Promise<void> {
@@ -610,7 +643,9 @@ export class ClaudeAcpAgent implements Agent {
     params: NewSessionRequest,
     creationOpts: { resume?: string; forkSession?: boolean } = {},
   ): Promise<NewSessionResponse> {
-    const sessionId = creationOpts.resume ?? randomUUID();
+    // When forking, generate a new session ID (fork creates a new independent session)
+    // When resuming (not fork), use the original session ID
+    const sessionId = creationOpts.forkSession ? randomUUID() : (creationOpts.resume ?? randomUUID());
     const input = new Pushable<SDKUserMessage>();
 
     const settingsManager = new SettingsManager(params.cwd, {
