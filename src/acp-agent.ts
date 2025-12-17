@@ -221,8 +221,9 @@ export class ClaudeAcpAgent implements Agent {
   /**
    * Fork an existing session to create a new independent session.
    * This is the ACP protocol method handler for session/fork.
+   * Named unstable_forkSession to match SDK expectations (session/fork routes to this method).
    */
-  async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
     // cwd and mcpServers are passed via _meta since they're not in the SDK type yet
     const meta = params._meta as { cwd?: string; mcpServers?: any[] } | undefined;
     return await this.createSession(
@@ -239,10 +240,10 @@ export class ClaudeAcpAgent implements Agent {
   }
 
   /**
-   * @deprecated Use forkSession instead. This is kept for backward compatibility.
+   * Alias for unstable_forkSession for convenience.
    */
-  async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
-    return this.forkSession(params);
+  async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    return this.unstable_forkSession(params);
   }
 
   /**
