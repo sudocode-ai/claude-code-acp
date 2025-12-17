@@ -224,12 +224,10 @@ export class ClaudeAcpAgent implements Agent {
    * Named unstable_forkSession to match SDK expectations (session/fork routes to this method).
    */
   async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
-    // cwd and mcpServers are passed via _meta since they're not in the SDK type yet
-    const meta = params._meta as { cwd?: string; mcpServers?: any[] } | undefined;
     return await this.createSession(
       {
-        cwd: meta?.cwd ?? process.cwd(),
-        mcpServers: meta?.mcpServers ?? [],
+        cwd: params.cwd,
+        mcpServers: params.mcpServers ?? [],
         _meta: params._meta,
       },
       {
