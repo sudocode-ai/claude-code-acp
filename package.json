@@ -30,10 +30,11 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run build",
+    "preversion": "npm run test:run && npm run build",
     "release": "./scripts/release.sh",
-    "publish:patch": "npm version patch && npm publish",
-    "publish:minor": "npm version minor && npm publish",
-    "publish:major": "npm version major && npm publish"
+    "publish:patch": "npm run test:run && npm run build && npm version patch && npm publish",
+    "publish:minor": "npm run test:run && npm run build && npm version minor && npm publish",
+    "publish:major": "npm run test:run && npm run build && npm version major && npm publish"
   },
   "keywords": [
     "claude",
