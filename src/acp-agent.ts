@@ -77,6 +77,10 @@ type Session = {
   cancelled: boolean;
   permissionMode: PermissionMode;
   settingsManager: SettingsManager;
+  abortController: AbortController;
+  cwd: string;
+  /** Optional: the actual session file path (for forked sessions where filename differs from sessionId) */
+  sessionFilePath?: string;
 };
 
 type BackgroundTerminal =
@@ -222,7 +226,15 @@ export class ClaudeAcpAgent implements Agent {
    * Named unstable_forkSession to match SDK expectations (session/fork routes to this method).
    */
   async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
-    return await this.createSession(
+    // Get the session directory to track new files
+    const sessionDir = this.getSessionDirPath(params.cwd);
+    const beforeFiles = new Set(
+      fs.existsSync(sessionDir)
+        ? fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'))
+        : []
+    );
+
+    const result = await this.createSession(
       {
         cwd: params.cwd,
         mcpServers: params.mcpServers ?? [],
@@ -233,6 +245,253 @@ export class ClaudeAcpAgent implements Agent {
         forkSession: true,
       },
     );
+
+    // Wait briefly for CLI to create the session file
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Find the CLI-assigned session ID by looking for new session files
+    const cliSessionId = await this.discoverCliSessionId(sessionDir, beforeFiles, result.sessionId);
+
+    if (cliSessionId && cliSessionId !== result.sessionId) {
+      // Check if the CLI assigned a non-UUID session ID (e.g., "agent-xxx")
+      // If so, we need to extract the internal sessionId from the file
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cliSessionId);
+
+      if (!isUuid) {
+        // Read the session file to extract the internal sessionId
+        const oldFilePath = path.join(sessionDir, `${cliSessionId}.jsonl`);
+        const internalSessionId = this.extractInternalSessionId(oldFilePath);
+
+        if (internalSessionId) {
+          this.logger.log(`[claude-code-acp] Fork: extracted internal sessionId ${internalSessionId} from ${cliSessionId}`);
+
+          // Check if target file already exists (CLI reuses session IDs for forks from same parent)
+          // If so, generate a new unique session ID to avoid collisions
+          let finalSessionId = internalSessionId;
+          let newFilePath = path.join(sessionDir, `${finalSessionId}.jsonl`);
+
+          if (fs.existsSync(newFilePath)) {
+            // Session ID collision - CLI created a fork with the same internal ID
+            // Generate a new UUID and update the file's internal session ID
+            finalSessionId = randomUUID();
+            newFilePath = path.join(sessionDir, `${finalSessionId}.jsonl`);
+            this.logger.log(`[claude-code-acp] Fork: session ID collision detected, using new ID: ${finalSessionId}`);
+
+            // Update the internal session ID in the file before renaming
+            this.updateSessionIdInFile(oldFilePath, finalSessionId);
+          }
+
+          // Rename the file to match the session ID so CLI can find it
+          try {
+            fs.renameSync(oldFilePath, newFilePath);
+            this.logger.log(`[claude-code-acp] Fork: renamed ${cliSessionId}.jsonl -> ${finalSessionId}.jsonl`);
+
+            // Promote sidechain to full session so it can be resumed/forked again
+            this.promoteToFullSession(newFilePath);
+          } catch (err) {
+            this.logger.error(`[claude-code-acp] Failed to rename session file: ${err}`);
+            // Continue anyway - the session might still work
+          }
+
+          // Re-register session with the final session ID
+          const session = this.sessions[result.sessionId];
+          this.sessions[finalSessionId] = session;
+          delete this.sessions[result.sessionId];
+          return { ...result, sessionId: finalSessionId };
+        }
+
+        // Fall through if we couldn't extract the internal ID
+        this.logger.error(`[claude-code-acp] Could not extract internal sessionId from ${oldFilePath}`);
+      }
+
+      // Re-register session with the CLI's session ID (if it's already a UUID or extraction failed)
+      this.logger.log(`[claude-code-acp] Fork: remapping session ${result.sessionId} -> ${cliSessionId}`);
+      this.sessions[cliSessionId] = this.sessions[result.sessionId];
+      delete this.sessions[result.sessionId];
+      return { ...result, sessionId: cliSessionId };
+    }
+
+    return result;
+  }
+
+  /**
+   * Get the directory where session files are stored for a given cwd.
+   */
+  private getSessionDirPath(cwd: string): string {
+    const realCwd = fs.realpathSync(cwd);
+    const cwdHash = realCwd.replace(/[/_]/g, "-");
+    return path.join(os.homedir(), ".claude", "projects", cwdHash);
+  }
+
+  /**
+   * Extract the internal sessionId from a session JSONL file.
+   * The CLI stores the actual session ID inside the file, which may differ from the filename.
+   * For forked sessions, the filename is "agent-xxx" but the internal sessionId is a UUID.
+   */
+  private extractInternalSessionId(filePath: string): string | null {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return null;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const firstLine = content.split('\n').find(line => line.trim().length > 0);
+
+      if (!firstLine) {
+        return null;
+      }
+
+      const parsed = JSON.parse(firstLine);
+      if (parsed.sessionId && typeof parsed.sessionId === 'string') {
+        // Verify it's a UUID format
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.sessionId);
+        if (isUuid) {
+          return parsed.sessionId;
+        }
+      }
+
+      return null;
+    } catch (err) {
+      this.logger.error(`[claude-code-acp] Failed to extract sessionId from ${filePath}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Promote a sidechain session to a regular session by modifying the session file.
+   * Forked sessions have "isSidechain": true which prevents them from being resumed.
+   * This method changes it to false so the session can be resumed/forked again.
+   */
+  private promoteToFullSession(filePath: string): boolean {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return false;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n');
+      const modifiedLines: string[] = [];
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          modifiedLines.push(line);
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line);
+          // Change isSidechain from true to false
+          if (parsed.isSidechain === true) {
+            parsed.isSidechain = false;
+          }
+          modifiedLines.push(JSON.stringify(parsed));
+        } catch {
+          // Keep line as-is if it can't be parsed
+          modifiedLines.push(line);
+        }
+      }
+
+      fs.writeFileSync(filePath, modifiedLines.join('\n'), 'utf-8');
+      this.logger.log(`[claude-code-acp] Promoted sidechain to full session: ${filePath}`);
+      return true;
+    } catch (err) {
+      this.logger.error(`[claude-code-acp] Failed to promote session: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Update the sessionId in all lines of a session JSONL file.
+   * This is used when we need to assign a new unique session ID to avoid collisions.
+   */
+  private updateSessionIdInFile(filePath: string, newSessionId: string): boolean {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return false;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n');
+      const modifiedLines: string[] = [];
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          modifiedLines.push(line);
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(line);
+          // Update the sessionId in each line
+          if (parsed.sessionId && typeof parsed.sessionId === 'string') {
+            parsed.sessionId = newSessionId;
+          }
+          modifiedLines.push(JSON.stringify(parsed));
+        } catch {
+          // Keep line as-is if it can't be parsed
+          modifiedLines.push(line);
+        }
+      }
+
+      fs.writeFileSync(filePath, modifiedLines.join('\n'), 'utf-8');
+      this.logger.log(`[claude-code-acp] Updated session ID in file: ${filePath}`);
+      return true;
+    } catch (err) {
+      this.logger.error(`[claude-code-acp] Failed to update session ID in file: ${err}`);
+      return false;
+    }
+  }
+
+  /**
+   * Discover the CLI-assigned session ID by looking for new session files.
+   * Returns the CLI's session ID if found, or the original sessionId if not.
+   */
+  private async discoverCliSessionId(
+    sessionDir: string,
+    beforeFiles: Set<string>,
+    fallbackId: string,
+    timeout: number = 2000
+  ): Promise<string> {
+    const start = Date.now();
+    // Pattern for CLI-assigned fork session IDs (agent-xxxxxxx)
+    const agentPattern = /^agent-[a-f0-9]+\.jsonl$/;
+
+    while (Date.now() - start < timeout) {
+      if (fs.existsSync(sessionDir)) {
+        const currentFiles = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'));
+        // Only look for new files that match the agent-xxx pattern
+        // This prevents picking up renamed UUID files from previous forks
+        const newFiles = currentFiles.filter(f => !beforeFiles.has(f) && agentPattern.test(f));
+
+        if (newFiles.length === 1) {
+          // Found exactly one new agent session file - this is our fork
+          this.logger.log(`[claude-code-acp] Discovered fork session file: ${newFiles[0]}`);
+          return newFiles[0].replace('.jsonl', '');
+        } else if (newFiles.length > 1) {
+          // Multiple new agent files - try to find the most recent one
+          let newestFile = '';
+          let newestMtime = 0;
+          for (const file of newFiles) {
+            const filePath = path.join(sessionDir, file);
+            const stat = fs.statSync(filePath);
+            if (stat.mtimeMs > newestMtime) {
+              newestMtime = stat.mtimeMs;
+              newestFile = file;
+            }
+          }
+          if (newestFile) {
+            this.logger.log(`[claude-code-acp] Discovered fork session file (newest of ${newFiles.length}): ${newestFile}`);
+            return newestFile.replace('.jsonl', '');
+          }
+        }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Timeout - return fallback
+    this.logger.log(`[claude-code-acp] Could not discover CLI session ID, using fallback: ${fallbackId}`);
+    return fallbackId;
   }
 
   /**
@@ -447,6 +706,118 @@ export class ClaudeAcpAgent implements Agent {
     }
     this.sessions[params.sessionId].cancelled = true;
     await this.sessions[params.sessionId].query.interrupt();
+  }
+
+  /**
+   * Handle extension methods from the client.
+   *
+   * Currently supports:
+   * - `_session/flush`: Flush a session to disk for fork-with-flush support
+   */
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method === "_session/flush") {
+      return this.handleSessionFlush(params as { sessionId: string; idleTimeout?: number; persistTimeout?: number });
+    }
+    throw RequestError.methodNotFound(method);
+  }
+
+  /**
+   * Flush a session to disk by aborting its query subprocess.
+   *
+   * This is used by the fork-with-flush mechanism to ensure session data
+   * is persisted to disk before forking. When the Claude SDK subprocess
+   * exits (via abort), it writes the session data to:
+   * ~/.claude/projects/<cwd-hash>/<sessionId>.jsonl
+   *
+   * After this method completes, the session is removed from memory and
+   * must be reloaded via loadSession() to continue using it.
+   */
+  private async handleSessionFlush(params: { sessionId: string; idleTimeout?: number; persistTimeout?: number }): Promise<Record<string, unknown>> {
+    const { sessionId, persistTimeout = 5000 } = params;
+    const session = this.sessions[sessionId];
+
+    if (!session) {
+      return { success: false, error: `Session ${sessionId} not found` };
+    }
+
+    try {
+      // Step 1: Mark session as cancelled to stop processing
+      session.cancelled = true;
+
+      // Step 2: Interrupt any ongoing query work
+      await session.query.interrupt();
+
+      // Step 3: End the input stream to signal no more input
+      session.input.end();
+
+      // Step 4: Abort the session using the AbortController
+      // This forces the Claude SDK subprocess to exit, which triggers disk persistence
+      session.abortController.abort();
+
+      // Step 5: Wait for the session file to appear on disk
+      // Use stored sessionFilePath for forked sessions (where filename differs from sessionId)
+      const sessionFilePath = session.sessionFilePath ?? this.getSessionFilePath(sessionId, session.cwd);
+      this.logger.log(`[claude-code-acp] Waiting for session file at: ${sessionFilePath}`);
+      this.logger.log(`[claude-code-acp] Session cwd: ${session.cwd}`);
+      const persisted = await this.waitForSessionFile(sessionFilePath, persistTimeout);
+
+      if (!persisted) {
+        this.logger.error(`[claude-code-acp] Session file not found at ${sessionFilePath} after ${persistTimeout}ms`);
+        // Check if file exists at the path
+        const exists = fs.existsSync(sessionFilePath);
+        this.logger.error(`[claude-code-acp] File exists check: ${exists}`);
+        // Still remove the session from memory
+        delete this.sessions[sessionId];
+        return { success: false, error: `Session file not created within timeout` };
+      }
+
+      // Step 6: Remove session from our map
+      // The client will call loadSession() to reload it from disk
+      delete this.sessions[sessionId];
+
+      this.logger.log(`[claude-code-acp] Session ${sessionId} flushed to disk at ${sessionFilePath}`);
+      return { success: true, filePath: sessionFilePath };
+    } catch (error) {
+      this.logger.error(`[claude-code-acp] Failed to flush session ${sessionId}:`, error);
+      // Clean up session on error
+      delete this.sessions[sessionId];
+      return { success: false, error: String(error) };
+    }
+  }
+
+  /**
+   * Get the file path where Claude Code stores session data.
+   *
+   * Claude Code stores sessions at:
+   * ~/.claude/projects/<cwd-hash>/<sessionId>.jsonl
+   *
+   * Where <cwd-hash> is the cwd with `/` replaced by `-`
+   * Note: We resolve the real path to handle macOS symlinks like /var -> /private/var
+   */
+  private getSessionFilePath(sessionId: string, cwd: string): string {
+    // Resolve the real path to handle macOS symlinks like /var -> /private/var
+    const realCwd = fs.realpathSync(cwd);
+    // Claude Code replaces both / and _ with - in the cwd hash
+    const cwdHash = realCwd.replace(/[/_]/g, "-");
+    return path.join(os.homedir(), ".claude", "projects", cwdHash, `${sessionId}.jsonl`);
+  }
+
+  /**
+   * Wait for a session file to appear on disk.
+   *
+   * @param filePath - Path to the session file
+   * @param timeout - Maximum time to wait in milliseconds
+   * @returns true if file appears, false if timeout
+   */
+  private async waitForSessionFile(filePath: string, timeout: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      if (fs.existsSync(filePath)) {
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return false;
   }
 
   async unstable_setSessionModel(
@@ -691,7 +1062,8 @@ export class ClaudeAcpAgent implements Agent {
     const extraArgs = { ...userProvidedOptions?.extraArgs };
     if (creationOpts?.resume === undefined) {
       // Set our own session id if not resuming an existing session.
-      // TODO: find a way to make this work for fork
+      // Note: For forked sessions (resume + fork), Claude CLI assigns its own session ID
+      // which means chain forking (fork of a fork) is not currently supported.
       extraArgs["session-id"] = sessionId;
     }
 
@@ -788,11 +1160,17 @@ export class ClaudeAcpAgent implements Agent {
       options.disallowedTools = disallowedTools;
     }
 
-    // Handle abort controller from meta options
-    const abortController = userProvidedOptions?.abortController;
-    if (abortController?.signal.aborted) {
+    // Create our own AbortController for session management
+    const sessionAbortController = new AbortController();
+
+    // Handle abort controller from meta options (user can still provide one)
+    const userAbortController = userProvidedOptions?.abortController;
+    if (userAbortController?.signal.aborted) {
       throw new Error("Cancelled");
     }
+
+    // Pass the abort controller to the query options
+    options.abortController = sessionAbortController;
 
     const q = query({
       prompt: input,
@@ -805,6 +1183,8 @@ export class ClaudeAcpAgent implements Agent {
       cancelled: false,
       permissionMode,
       settingsManager,
+      abortController: sessionAbortController,
+      cwd: params.cwd,
     };
 
     const availableCommands = await getAvailableSlashCommands(q);
