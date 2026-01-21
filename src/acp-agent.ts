@@ -735,18 +735,83 @@ export class ClaudeAcpAgent implements Agent {
    * Handle extension methods from the client.
    *
    * Currently supports:
+   * - `_session/inject`: Inject a message into an active session mid-execution
    * - `_session/flush`: Flush a session to disk for fork-with-flush support
    */
   async extMethod(
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (method === "_session/inject") {
+      return this.handleSessionInject(
+        params as { sessionId: string; message: string | PromptRequest["prompt"] },
+      );
+    }
     if (method === "_session/flush") {
       return this.handleSessionFlush(
         params as { sessionId: string; idleTimeout?: number; persistTimeout?: number },
       );
     }
     throw RequestError.methodNotFound(method);
+  }
+
+  /**
+   * Inject a message into an active session.
+   *
+   * This allows sending additional user input while a prompt() call is actively
+   * processing. The injected message will be queued and processed by the agent
+   * as part of the current conversation turn.
+   *
+   * Use cases:
+   * - Providing clarification while the agent is working
+   * - Adding context mid-execution
+   * - Sending corrections before a tool completes
+   *
+   * @param params.sessionId - The session to inject the message into
+   * @param params.message - Either a string or an array of ContentBlocks (same format as prompt)
+   * @returns Success status and any error message
+   */
+  private handleSessionInject(params: {
+    sessionId: string;
+    message: string | PromptRequest["prompt"];
+  }): Record<string, unknown> {
+    const { sessionId, message } = params;
+    const session = this.sessions[sessionId];
+
+    if (!session) {
+      return { success: false, error: `Session ${sessionId} not found` };
+    }
+
+    if (session.cancelled) {
+      return { success: false, error: `Session ${sessionId} is cancelled` };
+    }
+
+    try {
+      // Convert string to ContentBlock array if needed
+      const prompt: PromptRequest["prompt"] =
+        typeof message === "string" ? [{ type: "text", text: message }] : message;
+
+      // Create a PromptRequest-like object to reuse promptToClaude
+      const promptRequest: PromptRequest = {
+        sessionId,
+        prompt,
+      };
+
+      // Convert to SDK format and push to the session's input queue
+      const sdkMessage = promptToClaude(promptRequest);
+      session.input.push(sdkMessage);
+
+      this.logger.log(
+        `[claude-code-acp] Injected message into session ${sessionId}`,
+      );
+      return { success: true };
+    } catch (error) {
+      this.logger.error(
+        `[claude-code-acp] Failed to inject message into session ${sessionId}:`,
+        error,
+      );
+      return { success: false, error: String(error) };
+    }
   }
 
   /**

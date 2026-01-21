@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "child_process";
 import {
   Agent,
@@ -809,6 +809,187 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
     const { value } = await q.next();
     expect(value).toMatchObject({ type: "system", subtype: "init", session_id: sessionId });
   }, 10000);
+});
+
+describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("_session/inject e2e", () => {
+  let child: ReturnType<typeof spawn>;
+
+  beforeAll(async () => {
+    const valid = spawnSync("tsc", { stdio: "inherit" });
+    if (valid.status) {
+      throw new Error("failed to compile");
+    }
+    child = spawn("npm", ["run", "--silent", "dev"], {
+      stdio: ["pipe", "pipe", "inherit"],
+      env: process.env,
+    });
+    child.on("error", (error) => {
+      console.error("Error starting subprocess:", error);
+    });
+  });
+
+  afterAll(() => {
+    child.kill();
+  });
+
+  class InjectTestClient implements Client {
+    agent: Agent;
+    receivedText: string = "";
+    messageChunks: string[] = [];
+
+    constructor(agent: Agent) {
+      this.agent = agent;
+    }
+
+    takeReceivedText() {
+      const text = this.receivedText;
+      this.receivedText = "";
+      return text;
+    }
+
+    async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+      const optionId = params.options.find((p) => p.kind === "allow_once")!.optionId;
+      return { outcome: { outcome: "selected", optionId } };
+    }
+
+    async sessionUpdate(params: SessionNotification): Promise<void> {
+      if (params.update.sessionUpdate === "agent_message_chunk") {
+        if (params.update.content.type === "text") {
+          this.receivedText += params.update.content.text;
+          this.messageChunks.push(params.update.content.text);
+        }
+      }
+    }
+
+    async writeTextFile(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
+      return {};
+    }
+
+    async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
+      return { content: "" };
+    }
+  }
+
+  it("should inject message that is processed in next turn", async () => {
+    let client: InjectTestClient;
+    const input = nodeToWebWritable(child.stdin!);
+    const output = nodeToWebReadable(child.stdout!);
+    const stream = ndJsonStream(input, output);
+    const connection = new ClientSideConnection((agent) => {
+      client = new InjectTestClient(agent);
+      return client;
+    }, stream);
+
+    await connection.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+      },
+    });
+
+    const { sessionId } = await connection.newSession({
+      cwd: "./",
+      mcpServers: [],
+    });
+
+    // First prompt - simple greeting
+    await connection.prompt({
+      prompt: [{ type: "text", text: "Say hi." }],
+      sessionId,
+    });
+    client!.takeReceivedText(); // Clear first response
+
+    // Inject a message into the session (this queues it for the next turn)
+    const injectResult = await connection.extMethod("_session/inject", {
+      sessionId,
+      message: "In your next response, include the word ELEPHANT.",
+    });
+    expect(injectResult).toEqual({ success: true });
+
+    // Second prompt - the injected message should be processed first
+    await connection.prompt({
+      prompt: [{ type: "text", text: "What animal should you mention?" }],
+      sessionId,
+    });
+
+    // The response should acknowledge the injected instruction
+    const responseText = client!.takeReceivedText().toUpperCase();
+    expect(responseText).toContain("ELEPHANT");
+  }, 60000);
+
+  it("should inject ContentBlock array message for next turn", async () => {
+    let client: InjectTestClient;
+    const input = nodeToWebWritable(child.stdin!);
+    const output = nodeToWebReadable(child.stdout!);
+    const stream = ndJsonStream(input, output);
+    const connection = new ClientSideConnection((agent) => {
+      client = new InjectTestClient(agent);
+      return client;
+    }, stream);
+
+    await connection.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+      },
+    });
+
+    const { sessionId } = await connection.newSession({
+      cwd: "./",
+      mcpServers: [],
+    });
+
+    // First prompt
+    await connection.prompt({
+      prompt: [{ type: "text", text: "Say hi." }],
+      sessionId,
+    });
+    client!.takeReceivedText(); // Clear first response
+
+    // Inject using ContentBlock array format
+    const injectResult = await connection.extMethod("_session/inject", {
+      sessionId,
+      message: [
+        { type: "text", text: "In your next response, include the word BANANA." },
+      ],
+    });
+    expect(injectResult).toEqual({ success: true });
+
+    // Next prompt triggers processing of injected message
+    await connection.prompt({
+      prompt: [{ type: "text", text: "What fruit should you mention?" }],
+      sessionId,
+    });
+
+    const responseText = client!.takeReceivedText().toUpperCase();
+    expect(responseText).toContain("BANANA");
+  }, 60000);
+
+  it("should return error for non-existent session", async () => {
+    let client: InjectTestClient;
+    const input = nodeToWebWritable(child.stdin!);
+    const output = nodeToWebReadable(child.stdout!);
+    const stream = ndJsonStream(input, output);
+    const connection = new ClientSideConnection((agent) => {
+      client = new InjectTestClient(agent);
+      return client;
+    }, stream);
+
+    await connection.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {},
+    });
+
+    const injectResult = await connection.extMethod("_session/inject", {
+      sessionId: "non-existent-session-id",
+      message: "test",
+    });
+
+    expect(injectResult).toEqual({
+      success: false,
+      error: "Session non-existent-session-id not found",
+    });
+  }, 30000);
 });
 
 describe("permission requests", () => {
