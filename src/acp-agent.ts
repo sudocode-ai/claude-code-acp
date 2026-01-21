@@ -233,8 +233,8 @@ export class ClaudeAcpAgent implements Agent {
     const sessionDir = this.getSessionDirPath(params.cwd);
     const beforeFiles = new Set(
       fs.existsSync(sessionDir)
-        ? fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'))
-        : []
+        ? fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"))
+        : [],
     );
 
     const result = await this.createSession(
@@ -250,7 +250,7 @@ export class ClaudeAcpAgent implements Agent {
     );
 
     // Wait briefly for CLI to create the session file
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     // Find the CLI-assigned session ID by looking for new session files
     const cliSessionId = await this.discoverCliSessionId(sessionDir, beforeFiles, result.sessionId);
@@ -258,7 +258,9 @@ export class ClaudeAcpAgent implements Agent {
     if (cliSessionId && cliSessionId !== result.sessionId) {
       // Check if the CLI assigned a non-UUID session ID (e.g., "agent-xxx")
       // If so, we need to extract the internal sessionId from the file
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cliSessionId);
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        cliSessionId,
+      );
 
       if (!isUuid) {
         // Read the session file to extract the internal sessionId
@@ -266,7 +268,9 @@ export class ClaudeAcpAgent implements Agent {
         const internalSessionId = this.extractInternalSessionId(oldFilePath);
 
         if (internalSessionId) {
-          this.logger.log(`[claude-code-acp] Fork: extracted internal sessionId ${internalSessionId} from ${cliSessionId}`);
+          this.logger.log(
+            `[claude-code-acp] Fork: extracted internal sessionId ${internalSessionId} from ${cliSessionId}`,
+          );
 
           // Check if target file already exists (CLI reuses session IDs for forks from same parent)
           // If so, generate a new unique session ID to avoid collisions
@@ -278,7 +282,9 @@ export class ClaudeAcpAgent implements Agent {
             // Generate a new UUID and update the file's internal session ID
             finalSessionId = randomUUID();
             newFilePath = path.join(sessionDir, `${finalSessionId}.jsonl`);
-            this.logger.log(`[claude-code-acp] Fork: session ID collision detected, using new ID: ${finalSessionId}`);
+            this.logger.log(
+              `[claude-code-acp] Fork: session ID collision detected, using new ID: ${finalSessionId}`,
+            );
 
             // Update the internal session ID in the file before renaming
             this.updateSessionIdInFile(oldFilePath, finalSessionId);
@@ -287,7 +293,9 @@ export class ClaudeAcpAgent implements Agent {
           // Rename the file to match the session ID so CLI can find it
           try {
             fs.renameSync(oldFilePath, newFilePath);
-            this.logger.log(`[claude-code-acp] Fork: renamed ${cliSessionId}.jsonl -> ${finalSessionId}.jsonl`);
+            this.logger.log(
+              `[claude-code-acp] Fork: renamed ${cliSessionId}.jsonl -> ${finalSessionId}.jsonl`,
+            );
 
             // Promote sidechain to full session so it can be resumed/forked again
             this.promoteToFullSession(newFilePath);
@@ -304,11 +312,15 @@ export class ClaudeAcpAgent implements Agent {
         }
 
         // Fall through if we couldn't extract the internal ID
-        this.logger.error(`[claude-code-acp] Could not extract internal sessionId from ${oldFilePath}`);
+        this.logger.error(
+          `[claude-code-acp] Could not extract internal sessionId from ${oldFilePath}`,
+        );
       }
 
       // Re-register session with the CLI's session ID (if it's already a UUID or extraction failed)
-      this.logger.log(`[claude-code-acp] Fork: remapping session ${result.sessionId} -> ${cliSessionId}`);
+      this.logger.log(
+        `[claude-code-acp] Fork: remapping session ${result.sessionId} -> ${cliSessionId}`,
+      );
       this.sessions[cliSessionId] = this.sessions[result.sessionId];
       delete this.sessions[result.sessionId];
       return { ...result, sessionId: cliSessionId };
@@ -337,17 +349,19 @@ export class ClaudeAcpAgent implements Agent {
         return null;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const firstLine = content.split('\n').find(line => line.trim().length > 0);
+      const content = fs.readFileSync(filePath, "utf-8");
+      const firstLine = content.split("\n").find((line) => line.trim().length > 0);
 
       if (!firstLine) {
         return null;
       }
 
       const parsed = JSON.parse(firstLine);
-      if (parsed.sessionId && typeof parsed.sessionId === 'string') {
+      if (parsed.sessionId && typeof parsed.sessionId === "string") {
         // Verify it's a UUID format
-        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.sessionId);
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          parsed.sessionId,
+        );
         if (isUuid) {
           return parsed.sessionId;
         }
@@ -371,8 +385,8 @@ export class ClaudeAcpAgent implements Agent {
         return false;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const lines = content.split('\n');
+      const content = fs.readFileSync(filePath, "utf-8");
+      const lines = content.split("\n");
       const modifiedLines: string[] = [];
 
       for (const line of lines) {
@@ -394,7 +408,7 @@ export class ClaudeAcpAgent implements Agent {
         }
       }
 
-      fs.writeFileSync(filePath, modifiedLines.join('\n'), 'utf-8');
+      fs.writeFileSync(filePath, modifiedLines.join("\n"), "utf-8");
       this.logger.log(`[claude-code-acp] Promoted sidechain to full session: ${filePath}`);
       return true;
     } catch (err) {
@@ -413,8 +427,8 @@ export class ClaudeAcpAgent implements Agent {
         return false;
       }
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const lines = content.split('\n');
+      const content = fs.readFileSync(filePath, "utf-8");
+      const lines = content.split("\n");
       const modifiedLines: string[] = [];
 
       for (const line of lines) {
@@ -426,7 +440,7 @@ export class ClaudeAcpAgent implements Agent {
         try {
           const parsed = JSON.parse(line);
           // Update the sessionId in each line
-          if (parsed.sessionId && typeof parsed.sessionId === 'string') {
+          if (parsed.sessionId && typeof parsed.sessionId === "string") {
             parsed.sessionId = newSessionId;
           }
           modifiedLines.push(JSON.stringify(parsed));
@@ -436,7 +450,7 @@ export class ClaudeAcpAgent implements Agent {
         }
       }
 
-      fs.writeFileSync(filePath, modifiedLines.join('\n'), 'utf-8');
+      fs.writeFileSync(filePath, modifiedLines.join("\n"), "utf-8");
       this.logger.log(`[claude-code-acp] Updated session ID in file: ${filePath}`);
       return true;
     } catch (err) {
@@ -453,7 +467,7 @@ export class ClaudeAcpAgent implements Agent {
     sessionDir: string,
     beforeFiles: Set<string>,
     fallbackId: string,
-    timeout: number = 2000
+    timeout: number = 2000,
   ): Promise<string> {
     const start = Date.now();
     // Pattern for CLI-assigned fork session IDs (agent-xxxxxxx)
@@ -461,18 +475,18 @@ export class ClaudeAcpAgent implements Agent {
 
     while (Date.now() - start < timeout) {
       if (fs.existsSync(sessionDir)) {
-        const currentFiles = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'));
+        const currentFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
         // Only look for new files that match the agent-xxx pattern
         // This prevents picking up renamed UUID files from previous forks
-        const newFiles = currentFiles.filter(f => !beforeFiles.has(f) && agentPattern.test(f));
+        const newFiles = currentFiles.filter((f) => !beforeFiles.has(f) && agentPattern.test(f));
 
         if (newFiles.length === 1) {
           // Found exactly one new agent session file - this is our fork
           this.logger.log(`[claude-code-acp] Discovered fork session file: ${newFiles[0]}`);
-          return newFiles[0].replace('.jsonl', '');
+          return newFiles[0].replace(".jsonl", "");
         } else if (newFiles.length > 1) {
           // Multiple new agent files - try to find the most recent one
-          let newestFile = '';
+          let newestFile = "";
           let newestMtime = 0;
           for (const file of newFiles) {
             const filePath = path.join(sessionDir, file);
@@ -483,17 +497,21 @@ export class ClaudeAcpAgent implements Agent {
             }
           }
           if (newestFile) {
-            this.logger.log(`[claude-code-acp] Discovered fork session file (newest of ${newFiles.length}): ${newestFile}`);
-            return newestFile.replace('.jsonl', '');
+            this.logger.log(
+              `[claude-code-acp] Discovered fork session file (newest of ${newFiles.length}): ${newestFile}`,
+            );
+            return newestFile.replace(".jsonl", "");
           }
         }
       }
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
     // Timeout - return fallback
-    this.logger.log(`[claude-code-acp] Could not discover CLI session ID, using fallback: ${fallbackId}`);
+    this.logger.log(
+      `[claude-code-acp] Could not discover CLI session ID, using fallback: ${fallbackId}`,
+    );
     return fallbackId;
   }
 
@@ -719,9 +737,14 @@ export class ClaudeAcpAgent implements Agent {
    * Currently supports:
    * - `_session/flush`: Flush a session to disk for fork-with-flush support
    */
-  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async extMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     if (method === "_session/flush") {
-      return this.handleSessionFlush(params as { sessionId: string; idleTimeout?: number; persistTimeout?: number });
+      return this.handleSessionFlush(
+        params as { sessionId: string; idleTimeout?: number; persistTimeout?: number },
+      );
     }
     throw RequestError.methodNotFound(method);
   }
@@ -737,7 +760,11 @@ export class ClaudeAcpAgent implements Agent {
    * After this method completes, the session is removed from memory and
    * must be reloaded via loadSession() to continue using it.
    */
-  private async handleSessionFlush(params: { sessionId: string; idleTimeout?: number; persistTimeout?: number }): Promise<Record<string, unknown>> {
+  private async handleSessionFlush(params: {
+    sessionId: string;
+    idleTimeout?: number;
+    persistTimeout?: number;
+  }): Promise<Record<string, unknown>> {
     const { sessionId, persistTimeout = 5000 } = params;
     const session = this.sessions[sessionId];
 
@@ -761,13 +788,16 @@ export class ClaudeAcpAgent implements Agent {
 
       // Step 5: Wait for the session file to appear on disk
       // Use stored sessionFilePath for forked sessions (where filename differs from sessionId)
-      const sessionFilePath = session.sessionFilePath ?? this.getSessionFilePath(sessionId, session.cwd);
+      const sessionFilePath =
+        session.sessionFilePath ?? this.getSessionFilePath(sessionId, session.cwd);
       this.logger.log(`[claude-code-acp] Waiting for session file at: ${sessionFilePath}`);
       this.logger.log(`[claude-code-acp] Session cwd: ${session.cwd}`);
       const persisted = await this.waitForSessionFile(sessionFilePath, persistTimeout);
 
       if (!persisted) {
-        this.logger.error(`[claude-code-acp] Session file not found at ${sessionFilePath} after ${persistTimeout}ms`);
+        this.logger.error(
+          `[claude-code-acp] Session file not found at ${sessionFilePath} after ${persistTimeout}ms`,
+        );
         // Check if file exists at the path
         const exists = fs.existsSync(sessionFilePath);
         this.logger.error(`[claude-code-acp] File exists check: ${exists}`);
@@ -780,7 +810,9 @@ export class ClaudeAcpAgent implements Agent {
       // The client will call loadSession() to reload it from disk
       delete this.sessions[sessionId];
 
-      this.logger.log(`[claude-code-acp] Session ${sessionId} flushed to disk at ${sessionFilePath}`);
+      this.logger.log(
+        `[claude-code-acp] Session ${sessionId} flushed to disk at ${sessionFilePath}`,
+      );
       return { success: true, filePath: sessionFilePath };
     } catch (error) {
       this.logger.error(`[claude-code-acp] Failed to flush session ${sessionId}:`, error);
@@ -820,7 +852,7 @@ export class ClaudeAcpAgent implements Agent {
       if (fs.existsSync(filePath)) {
         return true;
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
     return false;
   }
