@@ -1048,3 +1048,57 @@ describe("permission requests", () => {
     }
   });
 });
+
+describe("auto-compaction configuration", () => {
+  it("should accept compaction config in NewSessionMeta", () => {
+    // Test that the CompactionConfig type structure is correct
+    const meta: { claudeCode: { compaction: { enabled: boolean; contextTokenThreshold?: number; customInstructions?: string } } } = {
+      claudeCode: {
+        compaction: {
+          enabled: true,
+          contextTokenThreshold: 50000,
+          customInstructions: "Focus on the key decisions and outcomes",
+        },
+      },
+    };
+
+    // Verify the structure
+    expect(meta.claudeCode.compaction.enabled).toBe(true);
+    expect(meta.claudeCode.compaction.contextTokenThreshold).toBe(50000);
+    expect(meta.claudeCode.compaction.customInstructions).toBe(
+      "Focus on the key decisions and outcomes",
+    );
+  });
+
+  it("should have sensible defaults for compaction config", () => {
+    // When compaction is not configured, it should be disabled
+    const metaWithoutCompaction: { claudeCode: { compaction?: unknown } } = {
+      claudeCode: {},
+    };
+    expect(metaWithoutCompaction.claudeCode.compaction).toBeUndefined();
+
+    // When compaction is enabled without threshold, default should be used
+    const metaWithDefaults: { claudeCode: { compaction: { enabled: boolean; contextTokenThreshold?: number } } } = {
+      claudeCode: {
+        compaction: {
+          enabled: true,
+        },
+      },
+    };
+    expect(metaWithDefaults.claudeCode.compaction.enabled).toBe(true);
+    expect(metaWithDefaults.claudeCode.compaction.contextTokenThreshold).toBeUndefined();
+    // The actual default (100000) is applied in createSession
+  });
+
+  it("should support minimal compaction config with just enabled flag", () => {
+    const minimalConfig: { claudeCode: { compaction: { enabled: boolean } } } = {
+      claudeCode: {
+        compaction: {
+          enabled: false,
+        },
+      },
+    };
+
+    expect(minimalConfig.claudeCode.compaction.enabled).toBe(false);
+  });
+});

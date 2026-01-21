@@ -73,6 +73,22 @@ export interface Logger {
   error: (...args: any[]) => void;
 }
 
+/**
+ * Internal state for tracking compaction.
+ */
+type CompactionState = {
+  /** Whether auto-compaction is enabled for this session */
+  enabled: boolean;
+  /** Token threshold that triggers compaction */
+  threshold: number;
+  /** Custom instructions for compaction summary */
+  customInstructions?: string;
+  /** Current total token count for this session */
+  currentTokens: number;
+  /** Whether a compaction is currently in progress */
+  isCompacting: boolean;
+};
+
 type Session = {
   query: Query;
   input: Pushable<SDKUserMessage>;
@@ -83,6 +99,8 @@ type Session = {
   cwd: string;
   /** Optional: the actual session file path (for forked sessions where filename differs from sessionId) */
   sessionFilePath?: string;
+  /** Auto-compaction state tracking */
+  compaction: CompactionState;
 };
 
 type BackgroundTerminal =
@@ -95,6 +113,31 @@ type BackgroundTerminal =
       status: "aborted" | "exited" | "killed" | "timedOut";
       pendingOutput: TerminalOutputResponse;
     };
+
+/**
+ * Configuration for automatic context compaction.
+ * When enabled, the session will automatically trigger compaction when token usage exceeds the threshold.
+ */
+export type CompactionConfig = {
+  /**
+   * Whether automatic compaction is enabled.
+   * @default false
+   */
+  enabled: boolean;
+
+  /**
+   * Token threshold that triggers automatic compaction.
+   * When the total token count exceeds this value, a /compact command is automatically sent.
+   * @default 100000
+   */
+  contextTokenThreshold?: number;
+
+  /**
+   * Optional custom instructions for the compaction summary.
+   * These instructions guide how Claude summarizes the conversation.
+   */
+  customInstructions?: string;
+};
 
 /**
  * Extra metadata that can be given to Claude Code when creating a new session.
@@ -115,6 +158,12 @@ export type NewSessionMeta = {
      *   - mcpServers (merged with ACP's mcpServers)
      */
     options?: Options;
+
+    /**
+     * Configuration for automatic context compaction.
+     * When enabled, automatically triggers /compact when token usage exceeds the threshold.
+     */
+    compaction?: CompactionConfig;
   };
 };
 
@@ -587,7 +636,18 @@ export class ClaudeAcpAgent implements Agent {
           switch (message.subtype) {
             case "init":
               break;
-            case "compact_boundary":
+            case "compact_boundary": {
+              // Reset token count after compaction
+              const session = this.sessions[params.sessionId];
+              if (session) {
+                session.compaction.currentTokens = 0;
+                session.compaction.isCompacting = false;
+                this.logger.log(
+                  `[auto-compaction] Compaction completed, token count reset. Previous tokens: ${message.compact_metadata.pre_tokens}`,
+                );
+              }
+              break;
+            }
             case "hook_response":
             case "status":
               // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
@@ -602,6 +662,17 @@ export class ClaudeAcpAgent implements Agent {
             return { stopReason: "cancelled" };
           }
 
+          // Track token usage for auto-compaction
+          const session = this.sessions[params.sessionId];
+          if (session && message.usage) {
+            const totalTokens =
+              message.usage.input_tokens +
+              message.usage.output_tokens +
+              (message.usage.cache_creation_input_tokens ?? 0) +
+              (message.usage.cache_read_input_tokens ?? 0);
+            session.compaction.currentTokens += totalTokens;
+          }
+
           switch (message.subtype) {
             case "success": {
               if (message.result.includes("Please run /login")) {
@@ -610,6 +681,13 @@ export class ClaudeAcpAgent implements Agent {
               if (message.is_error) {
                 throw RequestError.internalError(undefined, message.result);
               }
+
+              // Check if auto-compaction should be triggered
+              if (session && await this.shouldTriggerCompaction(params.sessionId)) {
+                await this.triggerAutoCompaction(params.sessionId);
+                // Continue processing - the compaction will happen in the background
+              }
+
               return { stopReason: "end_turn" };
             }
             case "error_during_execution":
@@ -737,6 +815,7 @@ export class ClaudeAcpAgent implements Agent {
    * Currently supports:
    * - `_session/inject`: Inject a message into an active session mid-execution
    * - `_session/flush`: Flush a session to disk for fork-with-flush support
+   * - `_session/setCompaction`: Configure automatic context compaction for a session
    */
   async extMethod(
     method: string,
@@ -750,6 +829,16 @@ export class ClaudeAcpAgent implements Agent {
     if (method === "_session/flush") {
       return this.handleSessionFlush(
         params as { sessionId: string; idleTimeout?: number; persistTimeout?: number },
+      );
+    }
+    if (method === "_session/setCompaction") {
+      return this.handleSessionSetCompaction(
+        params as {
+          sessionId: string;
+          enabled: boolean;
+          contextTokenThreshold?: number;
+          customInstructions?: string;
+        },
       );
     }
     throw RequestError.methodNotFound(method);
@@ -808,6 +897,59 @@ export class ClaudeAcpAgent implements Agent {
     } catch (error) {
       this.logger.error(
         `[claude-code-acp] Failed to inject message into session ${sessionId}:`,
+        error,
+      );
+      return { success: false, error: String(error) };
+    }
+  }
+
+  /**
+   * Configure automatic context compaction for a session.
+   *
+   * When enabled, the session will automatically trigger compaction when token usage
+   * exceeds the configured threshold. This helps manage context window limits during
+   * long-running conversations.
+   *
+   * @param params.sessionId - The session to configure
+   * @param params.enabled - Whether automatic compaction is enabled
+   * @param params.contextTokenThreshold - Token count that triggers compaction (default: 100000)
+   * @param params.customInstructions - Optional instructions for the compaction summary
+   * @returns Success status and any error message
+   */
+  private handleSessionSetCompaction(params: {
+    sessionId: string;
+    enabled: boolean;
+    contextTokenThreshold?: number;
+    customInstructions?: string;
+  }): Record<string, unknown> {
+    const { sessionId, enabled, contextTokenThreshold, customInstructions } = params;
+    const session = this.sessions[sessionId];
+
+    if (!session) {
+      return { success: false, error: `Session ${sessionId} not found` };
+    }
+
+    try {
+      // Update the session's compaction configuration
+      session.compaction.enabled = enabled;
+
+      if (contextTokenThreshold !== undefined) {
+        session.compaction.threshold = contextTokenThreshold;
+      }
+
+      if (customInstructions !== undefined) {
+        session.compaction.customInstructions = customInstructions;
+      }
+
+      this.logger.log(
+        `[claude-code-acp] Updated compaction config for session ${sessionId}: ` +
+          `enabled=${enabled}, threshold=${session.compaction.threshold}`,
+      );
+
+      return { success: true };
+    } catch (error) {
+      this.logger.error(
+        `[claude-code-acp] Failed to set compaction config for session ${sessionId}:`,
         error,
       );
       return { success: false, error: String(error) };
@@ -1095,6 +1237,59 @@ export class ClaudeAcpAgent implements Agent {
     };
   }
 
+  /**
+   * Check if auto-compaction should be triggered based on current token usage.
+   */
+  private async shouldTriggerCompaction(sessionId: string): Promise<boolean> {
+    const session = this.sessions[sessionId];
+    if (!session) return false;
+
+    const { compaction } = session;
+
+    // Check if auto-compaction is enabled and not already in progress
+    if (!compaction.enabled || compaction.isCompacting) {
+      return false;
+    }
+
+    // Check if current tokens exceed threshold
+    return compaction.currentTokens >= compaction.threshold;
+  }
+
+  /**
+   * Trigger automatic compaction by sending a /compact command.
+   */
+  private async triggerAutoCompaction(sessionId: string): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session) return;
+
+    const { compaction, input } = session;
+
+    // Mark compaction as in progress to prevent multiple triggers
+    compaction.isCompacting = true;
+
+    this.logger.log(
+      `[auto-compaction] Triggering compaction. Current tokens: ${compaction.currentTokens}, Threshold: ${compaction.threshold}`,
+    );
+
+    // Build the compact command with optional custom instructions
+    const compactCommand = compaction.customInstructions
+      ? `/compact ${compaction.customInstructions}`
+      : "/compact";
+
+    // Inject the compact command as a user message
+    const compactMessage: SDKUserMessage = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: compactCommand }],
+      },
+      session_id: sessionId,
+      parent_tool_use_id: null,
+    };
+
+    input.push(compactMessage);
+  }
+
   private async createSession(
     params: NewSessionRequest,
     creationOpts: { resume?: string; forkSession?: boolean } = {},
@@ -1293,6 +1488,16 @@ export class ClaudeAcpAgent implements Agent {
       options,
     });
 
+    // Extract compaction config from _meta if provided
+    const compactionConfig = (params._meta as NewSessionMeta | undefined)?.claudeCode?.compaction;
+    const compactionState: CompactionState = {
+      enabled: compactionConfig?.enabled ?? false,
+      threshold: compactionConfig?.contextTokenThreshold ?? 100000,
+      customInstructions: compactionConfig?.customInstructions,
+      currentTokens: 0,
+      isCompacting: false,
+    };
+
     this.sessions[sessionId] = {
       query: q,
       input: input,
@@ -1301,6 +1506,7 @@ export class ClaudeAcpAgent implements Agent {
       settingsManager,
       abortController: sessionAbortController,
       cwd: params.cwd,
+      compaction: compactionState,
     };
 
     const availableCommands = await getAvailableSlashCommands(q);
