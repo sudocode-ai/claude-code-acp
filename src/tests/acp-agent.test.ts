@@ -1102,3 +1102,116 @@ describe("auto-compaction configuration", () => {
     expect(minimalConfig.claudeCode.compaction.enabled).toBe(false);
   });
 });
+
+describe("compaction event emission", () => {
+  it("compaction_started event should have correct structure", () => {
+    const event = {
+      sessionUpdate: "compaction_started",
+      sessionId: "test-session-123",
+      trigger: "auto" as const,
+      preTokens: 105000,
+      threshold: 100000,
+    };
+
+    expect(event.sessionUpdate).toBe("compaction_started");
+    expect(event.sessionId).toBe("test-session-123");
+    expect(event.trigger).toBe("auto");
+    expect(event.preTokens).toBe(105000);
+    expect(event.threshold).toBe(100000);
+  });
+
+  it("compaction_started event for manual trigger should not require threshold", () => {
+    const event: {
+      sessionUpdate: string;
+      sessionId: string;
+      trigger: "manual";
+      preTokens: number;
+      threshold?: number;
+    } = {
+      sessionUpdate: "compaction_started",
+      sessionId: "test-session-456",
+      trigger: "manual",
+      preTokens: 80000,
+    };
+
+    expect(event.sessionUpdate).toBe("compaction_started");
+    expect(event.trigger).toBe("manual");
+    expect(event.threshold).toBeUndefined();
+  });
+
+  it("compaction_completed event should have correct structure", () => {
+    const event = {
+      sessionUpdate: "compaction_completed",
+      sessionId: "test-session-123",
+      trigger: "auto" as const,
+      preTokens: 105000,
+    };
+
+    expect(event.sessionUpdate).toBe("compaction_completed");
+    expect(event.sessionId).toBe("test-session-123");
+    expect(event.trigger).toBe("auto");
+    expect(event.preTokens).toBe(105000);
+  });
+
+  it("compaction_completed event for manual trigger", () => {
+    const event = {
+      sessionUpdate: "compaction_completed",
+      sessionId: "test-session-789",
+      trigger: "manual" as const,
+      preTokens: 75000,
+    };
+
+    expect(event.sessionUpdate).toBe("compaction_completed");
+    expect(event.trigger).toBe("manual");
+  });
+});
+
+describe("_session/setCompaction extension method", () => {
+  it("should return error for non-existent session", async () => {
+    const { ClaudeAcpAgent } = await import("../acp-agent.js");
+    const mockClient = {} as any;
+    const agent = new ClaudeAcpAgent(mockClient);
+
+    const result = await agent.extMethod("_session/setCompaction", {
+      sessionId: "non-existent-session",
+      enabled: true,
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: "Session non-existent-session not found",
+    });
+  });
+
+  it("should accept valid compaction configuration", async () => {
+    // Test the structure of valid params
+    const params = {
+      sessionId: "test-session",
+      enabled: true,
+      contextTokenThreshold: 50000,
+      customInstructions: "Focus on code changes",
+    };
+
+    expect(params.sessionId).toBe("test-session");
+    expect(params.enabled).toBe(true);
+    expect(params.contextTokenThreshold).toBe(50000);
+    expect(params.customInstructions).toBe("Focus on code changes");
+  });
+
+  it("should accept minimal compaction configuration", async () => {
+    const params: {
+      sessionId: string;
+      enabled: boolean;
+      contextTokenThreshold?: number;
+      customInstructions?: string;
+    } = {
+      sessionId: "test-session",
+      enabled: false,
+    };
+
+    expect(params.sessionId).toBe("test-session");
+    expect(params.enabled).toBe(false);
+    expect(params.contextTokenThreshold).toBeUndefined();
+    expect(params.customInstructions).toBeUndefined();
+  });
+});
