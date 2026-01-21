@@ -10,7 +10,7 @@ This tool implements an ACP agent by using the official [Claude Code SDK](https:
 - Images
 - Tool calls (with permission requests)
 - Following
-- Edit review
+- Edit reviewddddd
 - TODO lists
 - Interactive (and background) terminals
 - Custom [Slash commands](https://docs.anthropic.com/en/docs/claude-code/slash-commands)

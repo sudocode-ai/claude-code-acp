@@ -19,6 +19,8 @@ import {
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestError,
+  ResumeSessionRequest,
+  ResumeSessionResponse,
   SessionModelState,
   SessionNotification,
   SetSessionModelRequest,
@@ -194,6 +196,7 @@ export class ClaudeAcpAgent implements Agent {
         },
         sessionCapabilities: {
           fork: {},
+          resume: {},
         },
         loadSession: true,
       },
@@ -521,19 +524,21 @@ export class ClaudeAcpAgent implements Agent {
   }
 
   /**
-   * @deprecated Use loadSession instead. This is kept for backward compatibility.
+   * Resume an existing session. This delegates to loadSession for enhanced functionality.
    */
-  async unstable_resumeSession(params: {
-    sessionId: string;
-    _meta?: { cwd?: string; mcpServers?: any[]; [key: string]: unknown } | null;
-  }): Promise<LoadSessionResponse> {
-    const meta = params._meta as { cwd?: string; mcpServers?: any[] } | undefined;
-    return this.loadSession({
-      sessionId: params.sessionId,
-      cwd: meta?.cwd ?? process.cwd(),
-      mcpServers: meta?.mcpServers ?? [],
-      _meta: params._meta,
-    });
+  async unstable_resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    const response = await this.createSession(
+      {
+        cwd: params.cwd,
+        mcpServers: params.mcpServers ?? [],
+        _meta: params._meta,
+      },
+      {
+        resume: params.sessionId,
+      },
+    );
+
+    return response;
   }
 
   async authenticate(_params: AuthenticateRequest): Promise<void> {
@@ -997,9 +1002,17 @@ export class ClaudeAcpAgent implements Agent {
     params: NewSessionRequest,
     creationOpts: { resume?: string; forkSession?: boolean } = {},
   ): Promise<NewSessionResponse> {
-    // When forking, generate a new session ID (fork creates a new independent session)
-    // When resuming (not fork), use the original session ID
-    const sessionId = creationOpts.forkSession ? randomUUID() : (creationOpts.resume ?? randomUUID());
+    // We want to create a new session id unless it is resume,
+    // but not resume + forkSession.
+    let sessionId;
+    if (creationOpts.forkSession) {
+      sessionId = randomUUID();
+    } else if (creationOpts.resume) {
+      sessionId = creationOpts.resume;
+    } else {
+      sessionId = randomUUID();
+    }
+
     const input = new Pushable<SDKUserMessage>();
 
     const settingsManager = new SettingsManager(params.cwd, {
@@ -1060,17 +1073,21 @@ export class ClaudeAcpAgent implements Agent {
     // Extract options from _meta if provided
     const userProvidedOptions = (params._meta as NewSessionMeta | undefined)?.claudeCode?.options;
     const extraArgs = { ...userProvidedOptions?.extraArgs };
-    if (creationOpts?.resume === undefined) {
+    if (creationOpts?.resume === undefined || creationOpts?.forkSession) {
       // Set our own session id if not resuming an existing session.
-      // Note: For forked sessions (resume + fork), Claude CLI assigns its own session ID
-      // which means chain forking (fork of a fork) is not currently supported.
       extraArgs["session-id"] = sessionId;
     }
+
+    // Configure thinking tokens from environment variable
+    const maxThinkingTokens = process.env.MAX_THINKING_TOKENS
+      ? parseInt(process.env.MAX_THINKING_TOKENS, 10)
+      : undefined;
 
     const options: Options = {
       systemPrompt,
       settingSources: ["user", "project", "local"],
       stderr: (err) => this.logger.error(err),
+      ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
       ...userProvidedOptions,
       // Override certain fields that must be controlled by ACP
       cwd: params.cwd,
@@ -1088,6 +1105,7 @@ export class ClaudeAcpAgent implements Agent {
       ...(process.env.CLAUDE_CODE_EXECUTABLE && {
         pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE,
       }),
+      tools: { type: "preset", preset: "claude_code" },
       hooks: {
         ...userProvidedOptions?.hooks,
         PreToolUse: [
@@ -1107,7 +1125,8 @@ export class ClaudeAcpAgent implements Agent {
     };
 
     const allowedTools = [];
-    const disallowedTools = [];
+    // Disable this for now, not a great way to expose this over ACP at the moment (in progress work so we can revisit)
+    const disallowedTools = ["AskUserQuestion"];
 
     // Check if built-in tools should be disabled
     const disableBuiltInTools = params._meta?.disableBuiltInTools === true;
@@ -1276,7 +1295,13 @@ async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand
 
   return commands
     .map((command) => {
-      const input = command.argumentHint ? { hint: command.argumentHint } : null;
+      const input = command.argumentHint
+        ? {
+            hint: Array.isArray(command.argumentHint)
+              ? command.argumentHint.join(" ")
+              : command.argumentHint,
+          }
+        : null;
       let name = command.name;
       if (command.name.endsWith(" (MCP)")) {
         name = `mcp:${name.replace(" (MCP)", "")}`;
