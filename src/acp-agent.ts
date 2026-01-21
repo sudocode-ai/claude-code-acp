@@ -640,11 +640,26 @@ export class ClaudeAcpAgent implements Agent {
               // Reset token count after compaction
               const session = this.sessions[params.sessionId];
               if (session) {
+                const preTokens = message.compact_metadata.pre_tokens;
+                const trigger = message.compact_metadata.trigger;
+
                 session.compaction.currentTokens = 0;
                 session.compaction.isCompacting = false;
+
                 this.logger.log(
-                  `[auto-compaction] Compaction completed, token count reset. Previous tokens: ${message.compact_metadata.pre_tokens}`,
+                  `[auto-compaction] Compaction completed, token count reset. Previous tokens: ${preTokens}`,
                 );
+
+                // Emit compaction_completed event to client
+                await this.client.sessionUpdate({
+                  sessionId: params.sessionId,
+                  update: {
+                    sessionUpdate: "compaction_completed",
+                    sessionId: params.sessionId,
+                    trigger: trigger,
+                    preTokens: preTokens,
+                  } as any,
+                });
               }
               break;
             }
@@ -1267,9 +1282,23 @@ export class ClaudeAcpAgent implements Agent {
     // Mark compaction as in progress to prevent multiple triggers
     compaction.isCompacting = true;
 
+    const preTokens = compaction.currentTokens;
+
     this.logger.log(
-      `[auto-compaction] Triggering compaction. Current tokens: ${compaction.currentTokens}, Threshold: ${compaction.threshold}`,
+      `[auto-compaction] Triggering compaction. Current tokens: ${preTokens}, Threshold: ${compaction.threshold}`,
     );
+
+    // Emit compaction_started event to client
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "compaction_started",
+        sessionId,
+        trigger: "auto",
+        preTokens: preTokens,
+        threshold: compaction.threshold,
+      } as any,
+    });
 
     // Build the compact command with optional custom instructions
     const compactCommand = compaction.customInstructions
