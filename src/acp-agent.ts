@@ -650,15 +650,13 @@ export class ClaudeAcpAgent implements Agent {
                   `[auto-compaction] Compaction completed, token count reset. Previous tokens: ${preTokens}`,
                 );
 
-                // Emit compaction_completed event to client
-                await this.client.sessionUpdate({
+                // Emit compaction_completed event to client via extension notification
+                // (compaction events are not part of the standard ACP SessionUpdate schema)
+                // Note: Using "_" prefix for SDK 0.13+ compatibility with older client SDKs
+                await this.client.extNotification("_compaction_completed", {
                   sessionId: params.sessionId,
-                  update: {
-                    sessionUpdate: "compaction_completed",
-                    sessionId: params.sessionId,
-                    trigger: trigger,
-                    preTokens: preTokens,
-                  } as any,
+                  trigger: trigger,
+                  preTokens: preTokens,
                 });
               }
               break;
@@ -1288,16 +1286,14 @@ export class ClaudeAcpAgent implements Agent {
       `[auto-compaction] Triggering compaction. Current tokens: ${preTokens}, Threshold: ${compaction.threshold}`,
     );
 
-    // Emit compaction_started event to client
-    await this.client.sessionUpdate({
+    // Emit compaction_started event to client via extension notification
+    // (compaction events are not part of the standard ACP SessionUpdate schema)
+    // Note: Using "_" prefix for SDK 0.13+ compatibility with older client SDKs
+    await this.client.extNotification("_compaction_started", {
       sessionId,
-      update: {
-        sessionUpdate: "compaction_started",
-        sessionId,
-        trigger: "auto",
-        preTokens: preTokens,
-        threshold: compaction.threshold,
-      } as any,
+      trigger: "auto",
+      preTokens: preTokens,
+      threshold: compaction.threshold,
     });
 
     // Build the compact command with optional custom instructions
