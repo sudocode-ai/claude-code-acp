@@ -7,6 +7,7 @@ export {
   type ToolUpdateMeta,
   type NewSessionMeta,
   type CompactionConfig,
+  type SkillInfo,
 } from "./acp-agent.js";
 export {
   loadManagedSettings,

@@ -243,4 +243,93 @@ describe("session management", () => {
       delete (agent as any).sessions["push-test-session"];
     });
   });
+
+  describe("extMethod _session/listSkills", () => {
+    it("returns error for non-existent session", async () => {
+      const result = await agent.extMethod("_session/listSkills", {
+        sessionId: "non-existent-session",
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: "Session non-existent-session not found",
+      });
+    });
+
+    it("returns empty skills array when session has no skills", async () => {
+      // Mock a session without skills
+      const mockSession = {
+        query: {} as any,
+        input: {
+          push: () => {},
+          end: () => {},
+        },
+        cancelled: false,
+        permissionMode: "default" as const,
+        settingsManager: {} as any,
+        abortController: new AbortController(),
+        cwd: "/tmp",
+        compaction: {
+          enabled: false,
+          threshold: 100000,
+          currentTokens: 0,
+          isCompacting: false,
+        },
+        // No skills field
+      };
+      (agent as any).sessions["test-session"] = mockSession;
+
+      const result = await agent.extMethod("_session/listSkills", {
+        sessionId: "test-session",
+      });
+
+      expect(result).toEqual({
+        success: true,
+        skills: [],
+      });
+
+      // Cleanup
+      delete (agent as any).sessions["test-session"];
+    });
+
+    it("returns skills array when session has skills", async () => {
+      // Mock a session with skills
+      const mockSkills = [
+        { name: "pdf-processor", description: "Process PDF files", source: "project" },
+        { name: "code-reviewer", description: "Review code changes", source: "user" },
+      ];
+      const mockSession = {
+        query: {} as any,
+        input: {
+          push: () => {},
+          end: () => {},
+        },
+        cancelled: false,
+        permissionMode: "default" as const,
+        settingsManager: {} as any,
+        abortController: new AbortController(),
+        cwd: "/tmp",
+        compaction: {
+          enabled: false,
+          threshold: 100000,
+          currentTokens: 0,
+          isCompacting: false,
+        },
+        skills: mockSkills,
+      };
+      (agent as any).sessions["skills-session"] = mockSession;
+
+      const result = await agent.extMethod("_session/listSkills", {
+        sessionId: "skills-session",
+      });
+
+      expect(result).toEqual({
+        success: true,
+        skills: mockSkills,
+      });
+
+      // Cleanup
+      delete (agent as any).sessions["skills-session"];
+    });
+  });
 });

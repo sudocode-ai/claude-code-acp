@@ -89,6 +89,18 @@ type CompactionState = {
   isCompacting: boolean;
 };
 
+/**
+ * Information about a skill available in the session.
+ */
+export type SkillInfo = {
+  /** Skill name */
+  name: string;
+  /** Skill description */
+  description?: string;
+  /** Source of the skill */
+  source?: "user" | "project" | "plugin";
+};
+
 type Session = {
   query: Query;
   input: Pushable<SDKUserMessage>;
@@ -101,6 +113,8 @@ type Session = {
   sessionFilePath?: string;
   /** Auto-compaction state tracking */
   compaction: CompactionState;
+  /** Skills loaded for this session (populated from SDK init message) */
+  skills?: SkillInfo[];
 };
 
 type BackgroundTerminal =
@@ -634,8 +648,18 @@ export class ClaudeAcpAgent implements Agent {
       switch (message.type) {
         case "system":
           switch (message.subtype) {
-            case "init":
+            case "init": {
+              // Capture skills from the SDK init message if available
+              const session = this.sessions[params.sessionId];
+              if (session && (message as any).skills) {
+                session.skills = ((message as any).skills as any[]).map((s: any) => ({
+                  name: s.name ?? s,
+                  description: s.description,
+                  source: s.source,
+                }));
+              }
               break;
+            }
             case "compact_boundary": {
               // Reset token count after compaction
               const session = this.sessions[params.sessionId];
@@ -829,6 +853,7 @@ export class ClaudeAcpAgent implements Agent {
    * - `_session/inject`: Inject a message into an active session mid-execution
    * - `_session/flush`: Flush a session to disk for fork-with-flush support
    * - `_session/setCompaction`: Configure automatic context compaction for a session
+   * - `_session/listSkills`: List available skills for a session
    */
   async extMethod(
     method: string,
@@ -853,6 +878,9 @@ export class ClaudeAcpAgent implements Agent {
           customInstructions?: string;
         },
       );
+    }
+    if (method === "_session/listSkills") {
+      return this.handleSessionListSkills(params as { sessionId: string });
     }
     throw RequestError.methodNotFound(method);
   }
@@ -963,6 +991,37 @@ export class ClaudeAcpAgent implements Agent {
     } catch (error) {
       this.logger.error(
         `[claude-code-acp] Failed to set compaction config for session ${sessionId}:`,
+        error,
+      );
+      return { success: false, error: String(error) };
+    }
+  }
+
+  /**
+   * List available skills for a session.
+   *
+   * Skills are loaded based on the session's settingSources and plugins configuration.
+   * This method returns the skills that were discovered during session initialization.
+   *
+   * @param params.sessionId - The session to query skills for
+   * @returns Success status, skills array, and any error message
+   */
+  private handleSessionListSkills(params: { sessionId: string }): Record<string, unknown> {
+    const { sessionId } = params;
+    const session = this.sessions[sessionId];
+
+    if (!session) {
+      return { success: false, error: `Session ${sessionId} not found` };
+    }
+
+    try {
+      return {
+        success: true,
+        skills: session.skills ?? [],
+      };
+    } catch (error) {
+      this.logger.error(
+        `[claude-code-acp] Failed to list skills for session ${sessionId}:`,
         error,
       );
       return { success: false, error: String(error) };
@@ -1402,7 +1461,8 @@ export class ClaudeAcpAgent implements Agent {
 
     const options: Options = {
       systemPrompt,
-      settingSources: ["user", "project", "local"],
+      // Use user-provided settingSources or default to all sources
+      settingSources: userProvidedOptions?.settingSources ?? ["user", "project", "local"],
       stderr: (err) => this.logger.error(err),
       ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
       ...userProvidedOptions,
@@ -1441,9 +1501,13 @@ export class ClaudeAcpAgent implements Agent {
       ...creationOpts,
     };
 
-    const allowedTools = [];
-    // Disable this for now, not a great way to expose this over ACP at the moment (in progress work so we can revisit)
-    const disallowedTools = ["AskUserQuestion"];
+    // Start with user-provided tools lists, then add ACP-managed tools
+    const allowedTools = [...(userProvidedOptions?.allowedTools ?? [])];
+    // Disable AskUserQuestion for now, not a great way to expose this over ACP at the moment (in progress work so we can revisit)
+    const disallowedTools = [
+      "AskUserQuestion",
+      ...(userProvidedOptions?.disallowedTools ?? []),
+    ];
 
     // Check if built-in tools should be disabled
     const disableBuiltInTools = params._meta?.disableBuiltInTools === true;
