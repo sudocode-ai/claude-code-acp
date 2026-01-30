@@ -62,6 +62,7 @@ import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
 import packageJson from "../package.json" with { type: "json" };
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 export const CLAUDE_CONFIG_DIR = process.env.CLAUDE ?? path.join(os.homedir(), ".claude");
 
@@ -193,12 +194,12 @@ export type ToolUpdateMeta = {
   };
 };
 
-type ToolUseCache = {
+export type ToolUseCache = {
   [key: string]: {
     type: "tool_use" | "server_tool_use" | "mcp_tool_use";
     id: string;
     name: string;
-    input: any;
+    input: unknown;
   };
 };
 
@@ -234,17 +235,17 @@ export class ClaudeAcpAgent implements Agent {
     };
 
     // If client supports terminal-auth capability, use that instead.
-    // if (request.clientCapabilities?._meta?.["terminal-auth"] === true) {
-    //   const cliPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk/cli.js"));
+    if (request.clientCapabilities?._meta?.["terminal-auth"] === true) {
+      const cliPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk/cli.js"));
 
-    //   authMethod._meta = {
-    //     "terminal-auth": {
-    //       command: "node",
-    //       args: [cliPath, "/login"],
-    //       label: "Claude Code Login",
-    //     },
-    //   };
-    // }
+      authMethod._meta = {
+        "terminal-auth": {
+          command: "node",
+          args: [cliPath, "/login"],
+          label: "Claude Code Login",
+        },
+      };
+    }
 
     return {
       protocolVersion: 1,
@@ -685,6 +686,9 @@ export class ClaudeAcpAgent implements Agent {
               }
               break;
             }
+            case "hook_started":
+            case "task_notification":
+            case "hook_progress":
             case "hook_response":
             case "status":
               // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
@@ -720,7 +724,7 @@ export class ClaudeAcpAgent implements Agent {
               }
 
               // Check if auto-compaction should be triggered
-              if (session && await this.shouldTriggerCompaction(params.sessionId)) {
+              if (session && (await this.shouldTriggerCompaction(params.sessionId))) {
                 await this.triggerAutoCompaction(params.sessionId);
                 // Continue processing - the compaction will happen in the background
               }
@@ -775,6 +779,21 @@ export class ClaudeAcpAgent implements Agent {
             typeof message.message.content === "string" &&
             message.message.content.includes("<local-command-stdout>")
           ) {
+            // Handle /context by sending its reply as regular agent message.
+            if (message.message.content.includes("Context Usage")) {
+              for (const notification of toAcpNotifications(
+                message.message.content
+                  .replace("<local-command-stdout>", "")
+                  .replace("</local-command-stdout>", ""),
+                "assistant",
+                params.sessionId,
+                this.toolUseCache,
+                this.client,
+                this.logger,
+              )) {
+                await this.client.sessionUpdate(notification);
+              }
+            }
             this.logger.log(message.message.content);
             break;
           }
@@ -827,6 +846,7 @@ export class ClaudeAcpAgent implements Agent {
           break;
         }
         case "tool_progress":
+        case "tool_use_summary":
           break;
         case "auth_status":
           break;
@@ -931,9 +951,7 @@ export class ClaudeAcpAgent implements Agent {
       const sdkMessage = promptToClaude(promptRequest);
       session.input.push(sdkMessage);
 
-      this.logger.log(
-        `[claude-code-acp] Injected message into session ${sessionId}`,
-      );
+      this.logger.log(`[claude-code-acp] Injected message into session ${sessionId}`);
       return { success: true };
     } catch (error) {
       this.logger.error(
@@ -1020,10 +1038,7 @@ export class ClaudeAcpAgent implements Agent {
         skills: session.skills ?? [],
       };
     } catch (error) {
-      this.logger.error(
-        `[claude-code-acp] Failed to list skills for session ${sessionId}:`,
-        error,
-      );
+      this.logger.error(`[claude-code-acp] Failed to list skills for session ${sessionId}:`, error);
       return { success: false, error: String(error) };
     }
   }
@@ -1504,10 +1519,7 @@ export class ClaudeAcpAgent implements Agent {
     // Start with user-provided tools lists, then add ACP-managed tools
     const allowedTools = [...(userProvidedOptions?.allowedTools ?? [])];
     // Disable AskUserQuestion for now, not a great way to expose this over ACP at the moment (in progress work so we can revisit)
-    const disallowedTools = [
-      "AskUserQuestion",
-      ...(userProvidedOptions?.disallowedTools ?? []),
-    ];
+    const disallowedTools = ["AskUserQuestion", ...(userProvidedOptions?.disallowedTools ?? [])];
 
     // Check if built-in tools should be disabled
     const disableBuiltInTools = params._meta?.disableBuiltInTools === true;
@@ -1675,7 +1687,6 @@ async function getAvailableModels(query: Query): Promise<SessionModelState> {
 
 async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand[]> {
   const UNSUPPORTED_COMMANDS = [
-    "context",
     "cost",
     "login",
     "logout",
@@ -1954,6 +1965,7 @@ export function toAcpNotifications(
             toolCallId: chunk.tool_use_id,
             sessionUpdate: "tool_call_update",
             status: "is_error" in chunk && chunk.is_error ? "failed" : "completed",
+            rawOutput: chunk.content,
             ...toolUpdateFromToolResult(chunk, toolUseCache[chunk.tool_use_id]),
           };
         }
