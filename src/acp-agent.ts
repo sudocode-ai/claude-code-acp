@@ -319,6 +319,29 @@ export class ClaudeAcpAgent implements Agent {
     // Find the CLI-assigned session ID by looking for new session files
     const cliSessionId = await this.discoverCliSessionId(sessionDir, beforeFiles, result.sessionId);
 
+    // If no new file was created, create one by copying the parent session file
+    if (cliSessionId === result.sessionId) {
+      // cliSessionId equals fallback, meaning no new file was found
+      const parentFilePath = path.join(sessionDir, `${params.sessionId}.jsonl`);
+      const forkFilePath = path.join(sessionDir, `${result.sessionId}.jsonl`);
+
+      if (fs.existsSync(parentFilePath) && !fs.existsSync(forkFilePath)) {
+        try {
+          // Copy parent session file to fork session file
+          fs.copyFileSync(parentFilePath, forkFilePath);
+          // Update the internal session ID in the copied file
+          this.updateSessionIdInFile(forkFilePath, result.sessionId);
+          // Promote to full session (not sidechain)
+          this.promoteToFullSession(forkFilePath);
+          this.logger.log(
+            `[claude-code-acp] Fork: created fork file by copying parent: ${params.sessionId}.jsonl -> ${result.sessionId}.jsonl`,
+          );
+        } catch (err) {
+          this.logger.error(`[claude-code-acp] Failed to create fork file from parent: ${err}`);
+        }
+      }
+    }
+
     if (cliSessionId && cliSessionId !== result.sessionId) {
       // Check if the CLI assigned a non-UUID session ID (e.g., "agent-xxx")
       // If so, we need to extract the internal sessionId from the file

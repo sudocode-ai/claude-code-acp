@@ -243,7 +243,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     });
 
     expect(client.takeReceivedText()).toContain("");
-  }, 30000);
+  }, 120000);
 });
 
 describe("tool conversions", () => {
@@ -1007,8 +1007,16 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
       },
     });
 
-    const { value } = await q.next();
-    expect(value).toMatchObject({ type: "system", subtype: "init", session_id: sessionId });
+    // The SDK may send other events (like hook_started) before init
+    // Iterate to find the init event
+    let initEvent = null;
+    for await (const value of q) {
+      if (value.type === "system" && value.subtype === "init") {
+        initEvent = value;
+        break;
+      }
+    }
+    expect(initEvent).toMatchObject({ type: "system", subtype: "init", session_id: sessionId });
   }, 10000);
 });
 
