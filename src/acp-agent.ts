@@ -1635,7 +1635,7 @@ export class ClaudeAcpAgent implements Agent {
 
     // Fetch commands and models in the background to avoid blocking session creation.
     // These calls wait for the Claude Code subprocess to initialize, which can be slow.
-    // Results are sent via sessionUpdate notifications when ready.
+    // Results are sent via sessionUpdate; models via extension notification (_model_state_update).
     void (async () => {
       try {
         const [availableCommands, models] = await Promise.all([
@@ -1649,12 +1649,9 @@ export class ClaudeAcpAgent implements Agent {
             availableCommands,
           },
         });
-        this.client.sessionUpdate({
+        this.client.extNotification("_model_state_update", {
           sessionId,
-          update: {
-            sessionUpdate: "model_state_update",
-            models,
-          },
+          models,
         });
       } catch (e) {
         this.logger.error("Failed to fetch session metadata:", e);
