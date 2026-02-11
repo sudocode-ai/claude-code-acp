@@ -1633,19 +1633,33 @@ export class ClaudeAcpAgent implements Agent {
       compaction: compactionState,
     };
 
-    const availableCommands = await getAvailableSlashCommands(q);
-    const models = await getAvailableModels(q);
-
-    // Needs to happen after we return the session
-    setTimeout(() => {
-      this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "available_commands_update",
-          availableCommands,
-        },
-      });
-    }, 0);
+    // Fetch commands and models in the background to avoid blocking session creation.
+    // These calls wait for the Claude Code subprocess to initialize, which can be slow.
+    // Results are sent via sessionUpdate notifications when ready.
+    void (async () => {
+      try {
+        const [availableCommands, models] = await Promise.all([
+          getAvailableSlashCommands(q),
+          getAvailableModels(q),
+        ]);
+        this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands,
+          },
+        });
+        this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "model_state_update",
+            models,
+          },
+        });
+      } catch (e) {
+        this.logger.error("Failed to fetch session metadata:", e);
+      }
+    })();
 
     const availableModes = [
       {
@@ -1680,7 +1694,7 @@ export class ClaudeAcpAgent implements Agent {
 
     return {
       sessionId,
-      models,
+      models: null,
       modes: {
         currentModeId: permissionMode,
         availableModes,
