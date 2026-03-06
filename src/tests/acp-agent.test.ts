@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "child_process";
 import {
   Agent,
@@ -18,7 +18,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import { nodeToWebWritable, nodeToWebReadable } from "../utils.js";
 import { markdownEscape, toolInfoFromToolUse, toolUpdateFromToolResult } from "../tools.js";
-import { toAcpNotifications, promptToClaude } from "../acp-agent.js";
+import { toAcpNotifications, promptToClaude, getAvailableModels } from "../acp-agent.js";
 import { query, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import type {
@@ -983,6 +983,88 @@ describe("prompt conversion", () => {
         text: "/server:name (MCP) args",
         type: "text",
       },
+    ]);
+  });
+});
+
+describe("getAvailableModels", () => {
+  const mockModels = [
+    { value: "claude-sonnet-4-6", displayName: "Sonnet 4.6", description: "Fast model" },
+    { value: "claude-opus-4-6", displayName: "Opus 4.6", description: "Powerful model" },
+    { value: "claude-haiku-4-5", displayName: "Haiku 4.5", description: "Quick model" },
+  ];
+
+  function createMockQuery(models = mockModels) {
+    return {
+      supportedModels: async () => models,
+      setModel: async (_model: string) => {},
+    } as any;
+  }
+
+  const originalEnv = process.env.ANTHROPIC_MODEL;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.ANTHROPIC_MODEL;
+    } else {
+      process.env.ANTHROPIC_MODEL = originalEnv;
+    }
+  });
+
+  it("does not call setModel when ANTHROPIC_MODEL is not set", async () => {
+    delete process.env.ANTHROPIC_MODEL;
+    const mockQuery = createMockQuery();
+    const setModelSpy = vi.spyOn(mockQuery, "setModel");
+
+    const result = await getAvailableModels(mockQuery);
+
+    expect(setModelSpy).not.toHaveBeenCalled();
+    expect(result.currentModelId).toBe("claude-sonnet-4-6");
+    expect(result.availableModels).toHaveLength(3);
+  });
+
+  it("calls setModel when ANTHROPIC_MODEL matches a supported model", async () => {
+    process.env.ANTHROPIC_MODEL = "claude-opus-4-6";
+    const mockQuery = createMockQuery();
+    const setModelSpy = vi.spyOn(mockQuery, "setModel");
+
+    const result = await getAvailableModels(mockQuery);
+
+    expect(setModelSpy).toHaveBeenCalledWith("claude-opus-4-6");
+    expect(result.currentModelId).toBe("claude-opus-4-6");
+  });
+
+  it("does not call setModel when ANTHROPIC_MODEL does not match any supported model", async () => {
+    process.env.ANTHROPIC_MODEL = "claude-nonexistent-model";
+    const mockQuery = createMockQuery();
+    const setModelSpy = vi.spyOn(mockQuery, "setModel");
+
+    const result = await getAvailableModels(mockQuery);
+
+    expect(setModelSpy).not.toHaveBeenCalled();
+    expect(result.currentModelId).toBe("claude-sonnet-4-6");
+  });
+
+  it("returns empty string for currentModelId when no models available", async () => {
+    delete process.env.ANTHROPIC_MODEL;
+    const mockQuery = createMockQuery([]);
+
+    const result = await getAvailableModels(mockQuery);
+
+    expect(result.currentModelId).toBe("");
+    expect(result.availableModels).toHaveLength(0);
+  });
+
+  it("maps all models to availableModels correctly", async () => {
+    delete process.env.ANTHROPIC_MODEL;
+    const mockQuery = createMockQuery();
+
+    const result = await getAvailableModels(mockQuery);
+
+    expect(result.availableModels).toEqual([
+      { modelId: "claude-sonnet-4-6", name: "Sonnet 4.6", description: "Fast model" },
+      { modelId: "claude-opus-4-6", name: "Opus 4.6", description: "Powerful model" },
+      { modelId: "claude-haiku-4-5", name: "Haiku 4.5", description: "Quick model" },
     ]);
   });
 });
