@@ -1,11 +1,32 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  BashInput,
-  FileEditInput,
-  FileReadInput,
-  FileWriteInput,
-  TaskOutputInput,
-} from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
+// These types mirror the SDK tool input schemas but are defined locally
+// because the SDK no longer exports them as a subpath module.
+interface BashInput {
+  command: string;
+  timeout?: number;
+  description?: string;
+  run_in_background?: boolean;
+}
+interface FileReadInput {
+  file_path: string;
+  offset?: number;
+  limit?: number;
+}
+interface FileWriteInput {
+  file_path: string;
+  content: string;
+}
+interface FileEditInput {
+  file_path: string;
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+}
+interface TaskOutputInput {
+  task_id: string;
+  block?: boolean;
+  timeout?: number;
+}
 import { z } from "zod";
 import { CLAUDE_CONFIG_DIR, ClaudeAcpAgent } from "./acp-agent.js";
 import {

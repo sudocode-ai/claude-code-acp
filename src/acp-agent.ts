@@ -714,6 +714,11 @@ export class ClaudeAcpAgent implements Agent {
             case "hook_progress":
             case "hook_response":
             case "status":
+            case "local_command_output":
+            case "files_persisted":
+            case "elicitation_complete":
+            case "task_started":
+            case "task_progress":
               // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
               break;
             default:
@@ -872,6 +877,9 @@ export class ClaudeAcpAgent implements Agent {
         case "tool_use_summary":
           break;
         case "auth_status":
+          break;
+        case "rate_limit_event":
+        case "prompt_suggestion":
           break;
         default:
           unreachable(message);
@@ -1700,12 +1708,28 @@ export class ClaudeAcpAgent implements Agent {
   }
 }
 
-async function getAvailableModels(query: Query): Promise<SessionModelState> {
+export async function getAvailableModels(query: Query): Promise<SessionModelState> {
   const models = await query.supportedModels();
 
-  // Query doesn't give us access to the currently selected model, so we just choose the first model in the list.
-  const currentModel = models[0];
-  await query.setModel(currentModel.value);
+  // Only override the model if explicitly requested via env var.
+  // When ANTHROPIC_MODEL is not set, let the SDK use the user's
+  // configured default (e.g., their Claude Code profile settings).
+  const explicitModel = process.env.ANTHROPIC_MODEL;
+  let currentModelId: string | undefined;
+
+  if (explicitModel) {
+    const match = models.find((m) => m.value === explicitModel);
+    if (match) {
+      await query.setModel(match.value);
+      currentModelId = match.value;
+    }
+  }
+
+  // If no explicit model was set, report the first as "current"
+  // for the response, but don't call setModel — let the SDK decide.
+  if (!currentModelId && models.length > 0) {
+    currentModelId = models[0].value;
+  }
 
   const availableModels = models.map((model) => ({
     modelId: model.value,
@@ -1715,7 +1739,7 @@ async function getAvailableModels(query: Query): Promise<SessionModelState> {
 
   return {
     availableModels,
-    currentModelId: currentModel.value,
+    currentModelId: currentModelId ?? "",
   };
 }
 
